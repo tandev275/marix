@@ -2488,14 +2488,16 @@ const App: React.FC = () => {
   };
 
   // RDP connection function (used by handleConnect and after deps install)
-  const connectToRDP = async (server: Server) => {
+  const connectToRDP = async (server: Server, forceNewTab = false) => {
     // Check if already connected to this server
-    const existingSession = sessions.find(s => s.server.id === server.id);
-    if (existingSession) {
-      setActiveSessionId(existingSession.id);
-      setSidebarOpen(false);
-      setConnectingServerId(null);
-      return;
+    if (!forceNewTab) {
+      const existingSession = sessions.find(s => s.server.id === server.id);
+      if (existingSession) {
+        setActiveSessionId(existingSession.id);
+        setSidebarOpen(false);
+        setConnectingServerId(null);
+        return;
+      }
     }
 
     const connectionId = `rdp-${server.username}@${server.host}:${server.port}`;
@@ -2616,15 +2618,17 @@ const App: React.FC = () => {
     });
   };
 
-  const handleConnect = async (server: Server) => {
+  const handleConnect = async (server: Server, forceNewTab = false) => {
     try {
       // Check if already connected to this server
-      const existingSession = sessions.find(s => s.server.id === server.id);
-      if (existingSession) {
-        // Just switch to existing session
-        setActiveSessionId(existingSession.id);
-        setSidebarOpen(false);  // Auto-hide sidebar
-        return;
+      if (!forceNewTab) {
+        const existingSession = sessions.find(s => s.server.id === server.id);
+        if (existingSession) {
+          // Just switch to existing session
+          setActiveSessionId(existingSession.id);
+          setSidebarOpen(false);  // Auto-hide sidebar
+          return;
+        }
       }
 
       // Check if already connecting to this server (prevent double-click race condition)
@@ -2655,13 +2659,13 @@ const App: React.FC = () => {
             onProceed: () => {
               setFingerprintModal(null);
               // Continue with connection after user accepts
-              performSSHConnect(server);
+              performSSHConnect(server, forceNewTab);
             },
           });
           return;
         }
         // If status is 'match', continue directly
-        await performSSHConnect(server);
+        await performSSHConnect(server, forceNewTab);
         return;
       }
 
@@ -2728,7 +2732,7 @@ const App: React.FC = () => {
         }
         
         console.log('[App] handleConnect: Calling connectToRDP...');
-        await connectToRDP(server);
+        await connectToRDP(server, forceNewTab);
         return;
       }
 
@@ -2911,15 +2915,17 @@ const App: React.FC = () => {
     }
   };
 
-  const performSSHConnect = async (server: Server) => {
+  const performSSHConnect = async (server: Server, forceNewTab = false) => {
     try {
       // Double-check for existing session (in case of race condition)
-      const existingSession = sessions.find(s => s.server.id === server.id);
-      if (existingSession) {
-        setActiveSessionId(existingSession.id);
-        setSidebarOpen(false);
-        setConnectingServerId(null);
-        return;
+      if (!forceNewTab) {
+        const existingSession = sessions.find(s => s.server.id === server.id);
+        if (existingSession) {
+          setActiveSessionId(existingSession.id);
+          setSidebarOpen(false);
+          setConnectingServerId(null);
+          return;
+        }
       }
 
       console.log('[App] Performing SSH connection to:', server.host);
@@ -6500,11 +6506,7 @@ const App: React.FC = () => {
                   return (
                     <button
                       onClick={async () => {
-                        if (!AUTO_UPDATE_ENABLED) {
-                          setUpdateInfo({ checking: false, error: 'Auto-update is disabled in this fork build' });
-                          return;
-                        }
-                        await handleConnect(server);
+                        await handleConnect(server, true);
                         setQuickConnectOpen(false);
                         setQuickConnectSearch('');
                       }}
