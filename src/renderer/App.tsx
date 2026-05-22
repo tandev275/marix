@@ -2633,8 +2633,12 @@ const App: React.FC = () => {
 
   const handleConnect = async (server: Server, forceNewTab = false) => {
     try {
+      const protocol = server.protocol || 'ssh';
+
       // Check if already connected to this server
-      if (!forceNewTab) {
+      // SSH terminals intentionally allow multiple tabs per host, so only reuse
+      // existing sessions for non-SSH protocols unless caller explicitly requests a new tab.
+      if (protocol !== 'ssh' && !forceNewTab) {
         const existingSession = sessions.find(s => s.server.id === server.id);
         if (existingSession) {
           // Just switch to existing session
@@ -2649,8 +2653,6 @@ const App: React.FC = () => {
         console.log('[App] Already connecting to server:', server.name);
         return;
       }
-
-      const protocol = server.protocol || 'ssh';
 
       // Validate inputs (WSS doesn't need host/username)
       if (protocol !== 'wss' && (!server.host || !server.username)) {
@@ -2861,21 +2863,11 @@ const App: React.FC = () => {
   // Perform SSH connection and open SFTP directly
   const performSSHConnectSFTP = async (server: Server) => {
     try {
-      // Double-check for existing session (in case of race condition)
-      const existingSession = sessions.find(s => s.server.id === server.id);
-      if (existingSession) {
-        setActiveSessionId(existingSession.id);
-        setSessions(sessions.map(s => 
-          s.id === existingSession.id ? { ...s, type: 'sftp' } : s
-        ));
-        setSidebarOpen(false);
-        setConnectingServerId(null);
-        return;
-      }
-
       console.log('[App] Performing SSH connection (SFTP mode) to:', server.host);
+      const connectionId = `ssh-${server.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       
       const result = await ipcRenderer.invoke('ssh:connect', {
+        connectionId,
         host: server.host,
         port: server.port,
         username: server.username,
@@ -2930,21 +2922,12 @@ const App: React.FC = () => {
 
   const performSSHConnect = async (server: Server, forceNewTab = false) => {
     try {
-      // Double-check for existing session (in case of race condition)
-      if (!forceNewTab) {
-        const existingSession = sessions.find(s => s.server.id === server.id);
-        if (existingSession) {
-          setActiveSessionId(existingSession.id);
-          setSidebarOpen(false);
-          setConnectingServerId(null);
-          return;
-        }
-      }
-
       console.log('[App] Performing SSH connection to:', server.host);
+      const connectionId = `ssh-${server.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       
       // SSH connection
       const result = await ipcRenderer.invoke('ssh:connect', {
+        connectionId,
         host: server.host,
         port: server.port,
         username: server.username,

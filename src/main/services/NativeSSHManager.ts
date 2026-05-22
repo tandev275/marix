@@ -64,6 +64,7 @@ function getSSHPath(): string {
 }
 
 export interface SSHConfig {
+  connectionId?: string;  // Optional unique session id (allows multiple terminals for same host)
   host: string;
   port: number;
   username: string;
@@ -94,7 +95,7 @@ export class NativeSSHManager {
     cols: number = 80,
     rows: number = 24
   ): Promise<{ connectionId: string; emitter: EventEmitter }> {
-    const connectionId = `${config.username}@${config.host}:${config.port}`;
+    const connectionId = config.connectionId || `${config.username}@${config.host}:${config.port}`;
     
     console.log('[NativeSSH] Connecting:', connectionId);
 

@@ -2,6 +2,7 @@ import { Client, ConnectConfig, ClientChannel, Algorithms } from 'ssh2';
 import { EventEmitter } from 'events';
 
 export interface SSHConfig {
+  connectionId?: string;  // Optional unique session id (allows multiple terminals for same host)
   host: string;
   port: number;
   username: string;
@@ -78,7 +79,7 @@ export class SSHConnectionManager {
   private shellEmitters: Map<string, EventEmitter> = new Map();
 
   async connect(config: SSHConfig): Promise<string> {
-    const connectionId = `${config.username}@${config.host}:${config.port}`;
+    const connectionId = config.connectionId || `${config.username}@${config.host}:${config.port}`;
     
     console.log('[SSHConnectionManager] Connecting:', connectionId);
     

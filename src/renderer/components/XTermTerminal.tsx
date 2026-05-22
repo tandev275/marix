@@ -18,6 +18,10 @@ interface Props {
     port: number;
     username: string;
     password?: string;
+    authType?: 'password' | 'key';
+    privateKey?: string;
+    passphrase?: string;
+    envVars?: { [key: string]: string };
     groupId?: string;
   };
   showSnippetPanel?: boolean;
@@ -148,10 +152,15 @@ const XTermTerminal: React.FC<Props> = ({ connectionId, theme = 'Dracula', serve
       // Create new terminal with theme and config for auto-reconnect
       console.log('[XTermTerminal] Creating terminal:', connectionId);
       const config = server ? {
+        connectionId,
         host: server.host,
         port: server.port,
         username: server.username,
         password: server.password,
+        authType: server.authType || 'password',
+        privateKey: server.privateKey,
+        passphrase: server.passphrase,
+        envVars: server.envVars,
       } : undefined;
       instance = createTerminal(connectionId, containerRef.current, theme, config);
       instanceRef.current = instance;
