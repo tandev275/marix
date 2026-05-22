@@ -4,13 +4,57 @@ import ReactDOM from 'react-dom';
 const { ipcRenderer } = window.electron;
 
 // CodeMirror imports
-import { EditorState, Compartment } from '@codemirror/state';
+import { EditorSelection, EditorState } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, rectangularSelection, crosshairCursor, dropCursor } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, foldGutter, indentOnInput, HighlightStyle } from '@codemirror/language';
-import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
+import { searchKeymap } from '@codemirror/search';
 import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import { tags } from '@lezer/highlight';
+
+const editorClipboardKeymap = [
+  {
+    key: 'Mod-c',
+    run: (view: EditorView) => {
+      const { from, to } = view.state.selection.main;
+      const selection = view.state.sliceDoc(from, to);
+      if (selection) navigator.clipboard.writeText(selection).catch(() => {});
+      return true;
+    },
+  },
+  {
+    key: 'Mod-x',
+    run: (view: EditorView) => {
+      const { from, to } = view.state.selection.main;
+      const selection = view.state.sliceDoc(from, to);
+      if (!selection) return true;
+
+      navigator.clipboard.writeText(selection).catch(() => {});
+      view.dispatch({
+        changes: { from, to, insert: '' },
+        selection: EditorSelection.cursor(from),
+        scrollIntoView: true,
+      });
+      return true;
+    },
+  },
+  {
+    key: 'Mod-v',
+    run: (view: EditorView) => {
+      const { from, to } = view.state.selection.main;
+      navigator.clipboard.readText().then((text) => {
+        if (!text) return;
+        const cursorPos = from + text.length;
+        view.dispatch({
+          changes: { from, to, insert: text },
+          selection: EditorSelection.cursor(cursorPos),
+          scrollIntoView: true,
+        });
+      }).catch(() => {});
+      return true;
+    },
+  },
+];
 
 // Language imports
 import { javascript } from '@codemirror/lang-javascript';
@@ -49,7 +93,8 @@ const vscodeDarkTheme = EditorView.theme({
     caretColor: '#f5e0dc',
     fontFamily: "'JetBrains Mono', 'Fira Code', Consolas, monospace",
     fontSize: '14px',
-    padding: '8px 0',
+    padding: '0',
+    lineHeight: '1.5',
   },
   '.cm-cursor, .cm-dropCursor': {
     borderLeftColor: '#f5e0dc',
@@ -59,13 +104,15 @@ const vscodeDarkTheme = EditorView.theme({
     backgroundColor: '#45475a',
   },
   '.cm-activeLine': {
-    backgroundColor: '#313244',
+    backgroundColor: 'transparent',
   },
   '.cm-gutters': {
     backgroundColor: '#181825',
     color: '#6c7086',
     border: 'none',
     borderRight: '1px solid #313244',
+    paddingTop: '0',
+    paddingBottom: '0',
   },
   '.cm-activeLineGutter': {
     backgroundColor: '#313244',
@@ -74,6 +121,10 @@ const vscodeDarkTheme = EditorView.theme({
   '.cm-lineNumbers .cm-gutterElement': {
     padding: '0 8px 0 16px',
     minWidth: '40px',
+    lineHeight: '1.5',
+  },
+  '.cm-line': {
+    lineHeight: '1.5',
   },
   '.cm-foldGutter .cm-gutterElement': {
     padding: '0 4px',
@@ -328,8 +379,8 @@ const FileEditor: React.FC<Props> = ({
           autocompletion(),
           rectangularSelection(),
           crosshairCursor(),
-          highlightSelectionMatches(),
           keymap.of([
+            ...editorClipboardKeymap,
             ...closeBracketsKeymap,
             ...defaultKeymap,
             ...searchKeymap,

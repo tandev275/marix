@@ -6505,13 +6505,14 @@ const App: React.FC = () => {
                   
                   return (
                     <button
+                      key={server.id}
                       onClick={async () => {
                         await handleConnect(server, true);
                         setQuickConnectOpen(false);
                         setQuickConnectSearch('');
                       }}
-                      disabled={connectingServerId !== null}
-                      className="w-full px-4 py-3 flex items-center gap-3 hover:bg-navy-700 transition text-left border-b border-navy-700/50"
+                      disabled={connectingServerId === server.id}
+                      className="w-full px-4 py-3 flex items-center gap-3 hover:bg-navy-700 transition text-left border-b border-navy-700/50 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       {/* Protocol icon matching ServerList style */}
                       {isDatabaseProtocol ? (
