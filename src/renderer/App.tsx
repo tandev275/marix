@@ -1,14 +1,11 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, Suspense } from 'react';
 import { version as APP_VERSION } from '../../package.json';
 
 const { ipcRenderer } = window.electron;
 import ServerList from './components/ServerList';
 import XTermTerminal from './components/XTermTerminal';
-import DualPaneSFTP from './components/DualPaneSFTP';
 import RDPViewer from './components/RDPViewer';
 import RDPDepsInstaller from './components/RDPDepsInstaller';
-import WSSViewer from './components/WSSViewer';
-import DatabaseClient from './components/DatabaseClient';
 import AddServerModal from './components/AddServerModal';
 import ThemeSelector from './components/ThemeSelector';
 import LanguageSelector from './components/LanguageSelector';
@@ -24,10 +21,15 @@ import PortForwardingPage from './components/PortForwardingPage';
 import SessionMonitorIndicator from './components/SessionMonitorIndicator';
 import BenchmarkModal from './components/BenchmarkModal';
 import LockScreen from './components/LockScreen';
-import { BackupModal } from './components/BackupModal';
 import ConfirmModal from './components/ConfirmModal';
 import { useTerminalContext } from './contexts/TerminalContext';
 import { useLanguage } from './contexts/LanguageContext';
+
+const LazyDualPaneSFTP = React.lazy(() => import('./components/DualPaneSFTP'));
+const LazyRDPViewer = React.lazy(() => import('./components/RDPViewer'));
+const LazyWSSViewer = React.lazy(() => import('./components/WSSViewer'));
+const LazyDatabaseClient = React.lazy(() => import('./components/DatabaseClient'));
+const LazyBackupModal = React.lazy(() => import('./components/BackupModal').then(m => ({ default: m.BackupModal })));
 
 // Semver comparison helper: returns true if v1 > v2
 const isNewerVersion = (v1: string, v2: string): boolean => {
@@ -1798,9 +1800,20 @@ const App: React.FC = () => {
       }
     };
     
+    // Critical data first: server list (needed for primary UI)
     loadServers();
-    loadTagColors();
-    loadGitHubAuth();
+
+    // Defer non-critical startup work to improve perceived launch speed
+    const defer = (fn: () => void, delay = 0) => {
+      if (typeof (window as any).requestIdleCallback === 'function') {
+        (window as any).requestIdleCallback(fn, { timeout: 1200 });
+      } else {
+        setTimeout(fn, delay);
+      }
+    };
+
+    defer(() => loadTagColors(), 60);
+    defer(() => loadGitHubAuth(), 100);
     
     // Load session monitor setting
     const loadSessionMonitorSetting = async () => {
@@ -1811,7 +1824,7 @@ const App: React.FC = () => {
         console.error('[App] Failed to load session monitor setting:', err);
       }
     };
-    loadSessionMonitorSetting();
+    defer(() => loadSessionMonitorSetting(), 140);
     
     // Load command recall setting (from localStorage)
     const loadCommandRecallSetting = () => {
@@ -1833,7 +1846,7 @@ const App: React.FC = () => {
         setShowSnippetByDefault(false); // Default hidden on error
       }
     };
-    loadCommandRecallSetting();
+    defer(() => loadCommandRecallSetting(), 170);
     
     // Load terminal font setting
     const loadTerminalFontSetting = async () => {
@@ -1846,7 +1859,7 @@ const App: React.FC = () => {
         console.error('[App] Failed to load terminal font setting:', err);
       }
     };
-    loadTerminalFontSetting();
+    defer(() => loadTerminalFontSetting(), 200);
     
     // Load app lock settings
     const loadAppLockSettings = async () => {
@@ -1862,7 +1875,7 @@ const App: React.FC = () => {
         console.error('[App] Failed to load app lock settings:', err);
       }
     };
-    loadAppLockSettings();
+    defer(() => loadAppLockSettings(), 230);
     
     // Load build info
     const loadBuildInfo = async () => {
@@ -1874,7 +1887,7 @@ const App: React.FC = () => {
         console.error('[App] Failed to load build info:', err);
       }
     };
-    loadBuildInfo();
+    defer(() => loadBuildInfo(), 260);
     
     // Auto-check for updates on startup
     const checkForUpdatesAuto = async () => {
@@ -5965,15 +5978,18 @@ const App: React.FC = () => {
                   showSnippetPanel={showSnippetByDefault}
                 />
               ) : session.type === 'rdp' ? (
-                <RDPViewer
+                <Suspense fallback={<div className="h-full flex items-center justify-center text-gray-400">Loading RDP...</div>}>
+                <LazyRDPViewer
                   connectionId={session.connectionId}
                   serverName={session.server.name || session.server.host}
                   onConnect={() => console.log('[App] RDP connected:', session.connectionId)}
                   onClose={() => handleCloseSession(session.id)}
                   onError={(err) => alert('RDP Error: ' + err)}
                 />
+                </Suspense>
               ) : session.type === 'wss' ? (
-                <WSSViewer
+                <Suspense fallback={<div className="h-full flex items-center justify-center text-gray-400">Loading WSS...</div>}>
+                <LazyWSSViewer
                   connectionId={session.connectionId}
                   serverName={session.server.name || session.server.host}
                   url={session.server.wssUrl || `wss://${session.server.host}:${session.server.port}/`}
@@ -5984,8 +6000,10 @@ const App: React.FC = () => {
                   onClose={() => handleCloseSession(session.id)}
                   onError={(err) => console.log('[App] WSS Error:', err)}
                 />
+                </Suspense>
               ) : session.type === 'database' ? (
-                <DatabaseClient
+                <Suspense fallback={<div className="h-full flex items-center justify-center text-gray-400">Loading DB client...</div>}>
+                <LazyDatabaseClient
                   server={session.server as any}
                   connectionId={session.connectionId}
                   theme={appTheme}
@@ -5996,8 +6014,10 @@ const App: React.FC = () => {
                     ));
                   }}
                 />
+                </Suspense>
               ) : (
-                <DualPaneSFTP 
+                <Suspense fallback={<div className="h-full flex items-center justify-center text-gray-400">Loading SFTP...</div>}>
+                <LazyDualPaneSFTP 
                   connectionId={session.connectionId} 
                   server={session.server}
                   initialLocalPath={session.sftpPaths?.localPath}
@@ -6005,6 +6025,7 @@ const App: React.FC = () => {
                   onPathChange={(local, remote) => updateSftpPaths(session.id, local, remote)}
                   onSftpConnected={() => handleSftpConnected(session.id, session.connectionId)}
                 />
+                </Suspense>
               )}
             </div>
           ))}
@@ -6865,7 +6886,8 @@ const App: React.FC = () => {
 
       {/* Backup Modal */}
       {backupModalOpen && (
-        <BackupModal
+        <Suspense fallback={<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 text-white">Loading backup…</div>}>
+        <LazyBackupModal
           mode={backupModalOpen}
           onClose={closeBackupModal}
           backupMethod={backupMethod}
@@ -6919,6 +6941,7 @@ const App: React.FC = () => {
           onOneDriveRestore={handleOneDriveRestore}
           t={t}
         />
+        </Suspense>
       )}
 
       {/* RDP Connecting Overlay */}

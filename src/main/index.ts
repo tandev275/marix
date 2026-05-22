@@ -204,13 +204,11 @@ function createWindow() {
       spellcheck: false,  // Disable spellcheck for performance
     },
     backgroundColor: '#1a1d2e',
-    show: false,  // Don't show until ready
+    show: true,  // Show immediately so boot splash appears early
   });
 
-  // Show window when ready to prevent white flash
+  // Startup + periodic memory diagnostics
   mainWindow.once('ready-to-show', () => {
-    mainWindow?.show();
-    
     // Setup periodic memory cleanup (every 5 minutes)
     setInterval(() => {
       if (mainWindow && !mainWindow.isDestroyed()) {
