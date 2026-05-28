@@ -100,13 +100,7 @@ const XTermTerminal: React.FC<Props> = ({ connectionId, theme = 'Dracula', serve
     try {
       const text = await navigator.clipboard.readText();
       if (text && instanceRef.current?.isReady) {
-        ipcRenderer.invoke('ssh:writeShell', connectionId, text);
-        // Update input buffer with pasted text
-        for (const char of text) {
-          if (char.charCodeAt(0) >= 32 && char !== '\n' && char !== '\r') {
-            inputBufferRef.current += char;
-          }
-        }
+        instanceRef.current.xterm.paste(text);
         instanceRef.current.xterm.focus();
       }
     } catch (err) {

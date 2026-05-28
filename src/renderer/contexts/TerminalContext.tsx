@@ -126,9 +126,6 @@ export const TerminalProvider: React.FC<{ children: ReactNode }> = ({ children }
       }
     });
 
-    // Track if we're pasting to prevent duplicate
-    let isPasting = false;
-
     // Handle keyboard shortcuts for copy/paste
     // Important: Only return false for keydown events we explicitly handle
     // to prevent modifier keys from getting stuck
@@ -150,14 +147,11 @@ export const TerminalProvider: React.FC<{ children: ReactNode }> = ({ children }
       // Ctrl+Shift+V or Ctrl+V for paste
       if ((event.ctrlKey && event.shiftKey && event.key === 'V') || 
           (event.ctrlKey && !event.shiftKey && event.key === 'v')) {
-        isPasting = true;
         navigator.clipboard.readText().then(text => {
           if (text) {
-            ipcRenderer.invoke('ssh:writeShell', connectionId, text);
+            xterm.paste(text);
           }
-          // Reset flag after a short delay
-          setTimeout(() => { isPasting = false; }, 50);
-        }).catch(() => { isPasting = false; });
+        }).catch(() => {});
         return false;
       }
       
@@ -209,9 +203,8 @@ export const TerminalProvider: React.FC<{ children: ReactNode }> = ({ children }
     // Store listeners for cleanup
     listenersRef.current.set(connectionId, { data: handleData, close: handleClose });
 
-    // Handle user input - send immediately (but skip if pasting)
+    // Handle user input - send immediately
     xterm.onData(async (data) => {
-      if (isPasting) return;  // Skip - already sent via paste handler
       const inst = terminalsRef.current.get(connectionId);
       if (inst) {
         await ipcRenderer.invoke('ssh:writeShell', connectionId, data);
