@@ -135,8 +135,12 @@ export const TerminalProvider: React.FC<{ children: ReactNode }> = ({ children }
         return true;  // Let keyup events pass through normally
       }
       
+      const key = event.key.toLowerCase();
+      
       // Ctrl+Shift+C for copy
-      if (event.ctrlKey && event.shiftKey && event.key === 'C') {
+      if (event.ctrlKey && event.shiftKey && key === 'c') {
+        event.preventDefault();
+        event.stopPropagation();
         const selection = xterm.getSelection();
         if (selection) {
           navigator.clipboard.writeText(selection);
@@ -145,8 +149,10 @@ export const TerminalProvider: React.FC<{ children: ReactNode }> = ({ children }
       }
       
       // Ctrl+Shift+V or Ctrl+V for paste
-      if ((event.ctrlKey && event.shiftKey && event.key === 'V') || 
-          (event.ctrlKey && !event.shiftKey && event.key === 'v')) {
+      if ((event.ctrlKey && event.shiftKey && key === 'v') || 
+          (event.ctrlKey && !event.shiftKey && key === 'v')) {
+        event.preventDefault();
+        event.stopPropagation();
         navigator.clipboard.readText().then(text => {
           if (text) {
             xterm.paste(text);
