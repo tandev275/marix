@@ -25,9 +25,12 @@ interface Props {
     groupId?: string;
   };
   showSnippetPanel?: boolean;
+  // Serialized scrollback to replay into a freshly-created terminal (a tab that
+  // was torn off into this window). Written once, before live output resumes.
+  initialBuffer?: string;
 }
 
-const XTermTerminal: React.FC<Props> = ({ connectionId, theme = 'Dracula', server, showSnippetPanel = true }) => {
+const XTermTerminal: React.FC<Props> = ({ connectionId, theme = 'Dracula', server, showSnippetPanel = true, initialBuffer }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const { getTerminal, createTerminal, applyTheme } = useTerminalContext();
@@ -170,6 +173,12 @@ const XTermTerminal: React.FC<Props> = ({ connectionId, theme = 'Dracula', serve
         envVars: server.envVars,
       } : undefined;
       instance = createTerminal(connectionId, containerRef.current, theme, config);
+      // Replay scrollback carried from the window this tab was torn off from.
+      // Must happen before the rebind flushes live output (App's rebind effect
+      // runs after this child effect), so history lands first, in order.
+      if (initialBuffer) {
+        instance.xterm.write(initialBuffer);
+      }
       instanceRef.current = instance;
     }
 

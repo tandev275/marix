@@ -45,6 +45,7 @@ test.describe('Lazy chunk loading', () => {
       timeout(3000),
     ]);
     await Promise.race([electronApp?.close().catch(() => {}), timeout(5000)]);
+    try { electronApp?.process()?.kill('SIGKILL'); } catch {} // app can take seconds to quit; don't hang teardown
     fs.rmSync(userDataDir, { recursive: true, force: true });
   });
 

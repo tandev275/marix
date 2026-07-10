@@ -80,6 +80,7 @@ test.describe('Detach tab to a new window', () => {
       timeout(3000),
     ]);
     await Promise.race([electronApp?.close().catch(() => {}), timeout(5000)]);
+    try { electronApp?.process()?.kill('SIGKILL'); } catch {} // app can take seconds to quit; don't hang teardown
     fs.rmSync(userDataDir, { recursive: true, force: true });
   });
 
@@ -87,6 +88,11 @@ test.describe('Detach tab to a new window', () => {
     // Two tabs: detaching is only offered when the window would not be emptied.
     await openLocalTerminal(page);
     await openLocalTerminal(page);
+
+    // Produce scrollback that exists only in this window's xterm — the kind of
+    // history that was being lost when the tab moved to a fresh window.
+    await typeIntoTerminal(page, 'echo HISTORY_BEFORE_DETACH');
+    await expect(terminalText(page)).toContainText('HISTORY_BEFORE_DETACH', { timeout: 15000 });
 
     // Confirm the tab we are about to move has a working shell.
     await typeIntoTerminal(page, 'echo BEFORE_MOVE_OK');
@@ -103,6 +109,10 @@ test.describe('Detach tab to a new window', () => {
 
     const detached = await newWindowPromise;
     await detached.waitForLoadState('domcontentloaded');
+
+    // The pre-detach scrollback was serialized and replayed into the new window's
+    // fresh xterm — history is not lost across the move.
+    await expect(terminalText(detached)).toContainText('HISTORY_BEFORE_DETACH', { timeout: 20000 });
 
     // The shell kept running while unowned, and its output was replayed here.
     await expect(terminalText(detached)).toContainText('BUFFERED_ACROSS_MOVE', { timeout: 20000 });

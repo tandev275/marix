@@ -233,6 +233,9 @@ function closeWindowConnections(win: BrowserWindow) {
     } catch {
       // Not an SSH connection, or already gone.
     }
+    // Release the SSH2 background client too, or it leaks when a detached window
+    // holding an SSH tab is closed.
+    sshManager.disconnect(connectionId).catch(() => {});
     try {
       wssManager.disconnect(connectionId);
     } catch {
@@ -309,8 +312,12 @@ function createWindow(sessionsToAdopt?: any[], dropPoint?: { x: number; y: numbe
   appWindows.add(win);
   mainWindow = win;
 
+  // Capture the webContents id now: in the 'closed' handler below the webContents
+  // is already destroyed and touching win.webContents throws "Object has been destroyed".
+  const webContentsId = win.webContents.id;
+
   if (sessionsToAdopt && sessionsToAdopt.length > 0) {
-    pendingSessions.set(win.webContents.id, sessionsToAdopt);
+    pendingSessions.set(webContentsId, sessionsToAdopt);
   }
 
   // Dialogs and app-level events target the window the user is looking at.
@@ -356,7 +363,7 @@ function createWindow(sessionsToAdopt?: any[], dropPoint?: { x: number; y: numbe
       if (activeFTP > 0) details.push(`FTP: ${activeFTP}`);
       if (activeDB > 0) details.push(`Database: ${activeDB}`);
     } else {
-      const owned = connectionsForWebContents(win.webContents.id);
+      const owned = connectionsForWebContents(webContentsId);
       totalActive = owned.length;
       if (totalActive > 0) details.push(`SSH: ${totalActive}`);
     }
@@ -384,7 +391,7 @@ function createWindow(sessionsToAdopt?: any[], dropPoint?: { x: number; y: numbe
 
   win.on('closed', () => {
     appWindows.delete(win);
-    pendingSessions.delete(win.webContents.id);
+    pendingSessions.delete(webContentsId);
     if (mainWindow === win) {
       mainWindow = appWindows.values().next().value ?? null;
     }

@@ -98,6 +98,9 @@ export interface Session {
   };
   wssStatus?: 'connecting' | 'connected' | 'disconnected' | 'error';
   wssError?: string;
+  // Serialized scrollback carried from another window when this tab was torn off.
+  // Written into the fresh xterm once, then irrelevant.
+  initialBuffer?: string;
 }
 
 const App: React.FC = () => {
@@ -336,7 +339,7 @@ const App: React.FC = () => {
     { name: 'DejaVu Sans Mono', value: 'DejaVu Sans Mono' },
   ];
   
-  const { destroyTerminal, applyThemeToAll, applyFontToAll } = useTerminalContext();
+  const { destroyTerminal, serializeTerminal, applyThemeToAll, applyFontToAll } = useTerminalContext();
   const { t } = useLanguage();
 
   // Available lock timeout options (minutes) - must be after t() is available
@@ -3176,6 +3179,10 @@ const App: React.FC = () => {
 
     setTabContextMenu(null);
 
+    // Capture the scrollback before disposing so the new window can replay it —
+    // the backend session lives on, but the new window's xterm starts empty.
+    const initialBuffer = serializeTerminal(session.connectionId) || undefined;
+
     // Stop routing output here before tearing down the local xterm, so bytes
     // emitted during the handover are buffered in main rather than dropped.
     await ipcRenderer.invoke('session:detach', [session.connectionId]);
@@ -3190,7 +3197,8 @@ const App: React.FC = () => {
       setActiveSessionId(remaining[0]?.id || null);
     }
 
-    const result = await ipcRenderer.invoke('window:openWithSessions', [session], dropPoint);
+    const handoff: Session = { ...session, initialBuffer };
+    const result = await ipcRenderer.invoke('window:openWithSessions', [handoff], dropPoint);
     if (!result?.success) {
       console.error('[App] Failed to detach tab:', result?.error);
     }
@@ -3642,6 +3650,7 @@ const App: React.FC = () => {
             <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="1" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9"/></svg>
           </button>
           <button
+            data-testid="window-close"
             onClick={() => ipcRenderer.invoke('window:close')}
             className="w-12 h-full flex items-center justify-center hover:bg-red-600 transition text-gray-400 hover:text-white"
           >
@@ -6089,11 +6098,12 @@ const App: React.FC = () => {
               style={{ display: session.id === activeSessionId ? 'block' : 'none' }}
             >
               {session.type === 'terminal' ? (
-                <XTermTerminal 
+                <XTermTerminal
                   connectionId={session.connectionId}
                   theme={currentTheme}
                   server={session.server}
                   showSnippetPanel={showSnippetByDefault}
+                  initialBuffer={session.initialBuffer}
                 />
               ) : session.type === 'rdp' ? (
                 <Suspense fallback={<div className="h-full flex items-center justify-center text-gray-400">Loading RDP...</div>}>

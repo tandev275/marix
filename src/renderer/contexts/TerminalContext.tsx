@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useRef, ReactNode } from 'react';
 import { Terminal as XTerm, ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SerializeAddon } from '@xterm/addon-serialize';
 import { getThemeSync, getTheme } from '../themeService';
 
 const { ipcRenderer } = window.electron;
@@ -17,6 +18,7 @@ interface TerminalContextType {
   getTerminal: (connectionId: string) => TerminalInstance | undefined;
   createTerminal: (connectionId: string, container: HTMLDivElement, themeName?: string, config?: any, fontFamily?: string) => TerminalInstance;
   destroyTerminal: (connectionId: string) => void;
+  serializeTerminal: (connectionId: string) => string | null;
   applyTheme: (connectionId: string, themeName: string) => void;
   applyThemeToAll: (themeName: string) => void;
   applyFontToAll: (fontFamily: string) => void;
@@ -259,6 +261,25 @@ export const TerminalProvider: React.FC<{ children: ReactNode }> = ({ children }
     return instance;
   };
 
+  // Capture a terminal's current screen + scrollback as a replayable string
+  // (ANSI escapes, colors preserved). Used to carry history to another window
+  // when a tab is torn off — the backend session survives, but the new window's
+  // xterm starts empty, so we replay this into it.
+  const serializeTerminal = (connectionId: string): string | null => {
+    const instance = terminalsRef.current.get(connectionId);
+    if (!instance) return null;
+    try {
+      const serializer = new SerializeAddon();
+      instance.xterm.loadAddon(serializer);
+      const data = serializer.serialize();
+      serializer.dispose();
+      return data;
+    } catch (e) {
+      console.log('[TerminalContext] Serialize failed:', e);
+      return null;
+    }
+  };
+
   const destroyTerminal = (connectionId: string) => {
     const instance = terminalsRef.current.get(connectionId);
     if (instance) {
@@ -338,7 +359,7 @@ export const TerminalProvider: React.FC<{ children: ReactNode }> = ({ children }
   };
 
   return (
-    <TerminalContext.Provider value={{ getTerminal, createTerminal, destroyTerminal, applyTheme, applyThemeToAll, applyFontToAll }}>
+    <TerminalContext.Provider value={{ getTerminal, createTerminal, destroyTerminal, serializeTerminal, applyTheme, applyThemeToAll, applyFontToAll }}>
       {children}
     </TerminalContext.Provider>
   );
