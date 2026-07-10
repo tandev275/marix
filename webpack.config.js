@@ -11,7 +11,10 @@ module.exports = {
     rules: [
       {
         test: /\.tsx?$/,
-        use: 'ts-loader',
+        // Use the renderer tsconfig (module: esnext) so dynamic import() is kept
+        // as a real split point instead of being downleveled to require() by the
+        // base tsconfig's module: commonjs.
+        use: { loader: 'ts-loader', options: { configFile: 'tsconfig.renderer.json' } },
         exclude: /node_modules/,
       },
       {
@@ -29,12 +32,23 @@ module.exports = {
   },
   output: {
     filename: 'renderer.js',
+    chunkFilename: '[name].[contenthash].js',
+    // Load async chunks relative to index.html — required under file:// in the
+    // packaged app, where there is no server origin.
+    publicPath: './',
+    // The chunk-loading runtime references the global object; in the sandboxed
+    // renderer (nodeIntegration off) Node's `global` is absent, so point it at
+    // globalThis or the split chunks fail with "global is not defined".
+    globalObject: 'globalThis',
     path: path.resolve(__dirname, 'dist/renderer'),
     clean: true,  // Clean output directory before build
   },
   optimization: {
     minimize: true,
-    // Note: splitChunks disabled for Electron renderer - single bundle is more reliable
+    // Split the lazily-imported viewers (RDP, WSS, database, dual-pane SFTP,
+    // backup) into their own chunks so an SSH-only session never pays to parse
+    // them at startup.
+    splitChunks: { chunks: 'async' },
   },
   performance: {
     hints: false,  // Disable performance warnings

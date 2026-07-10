@@ -6,16 +6,17 @@ import * as https from 'https';
 import { promisify } from 'util';
 
 // ============================================================================
-// MEMORY OPTIMIZATION FLAGS (applied before app ready)
+// RUNTIME FLAGS (applied before app ready)
 // ============================================================================
-// Limit V8 memory for renderer process  
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256 --optimize-for-size');
-// Disable GPU process if not needed (saves ~50MB)
-app.commandLine.appendSwitch('disable-gpu-compositing');
-// Reduce memory usage by limiting background processes
+// Tuned for a responsive UI over minimal memory. Cap the renderer heap to bound
+// memory with several terminals open, but do NOT pass --optimize-for-size: it
+// trades JS execution speed for a small memory win and makes the UI sluggish.
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512');
+// Keep timers running when the window is backgrounded so terminals stay live.
 app.commandLine.appendSwitch('disable-background-timer-throttling');
-// Disable hardware acceleration for lower memory (can enable if needed)
-// app.commandLine.appendSwitch('disable-hardware-acceleration');
+// GPU compositing is left ENABLED (previously disabled to save ~50MB) — it makes
+// terminal scrolling and repaint noticeably smoother. If a Linux GPU/driver combo
+// misbehaves, re-add: app.commandLine.appendSwitch('disable-gpu-compositing').
 
 import { NativeSSHManager } from './services/NativeSSHManager';
 import { SSHConnectionManager } from './services/SSHConnectionManager';
@@ -55,7 +56,6 @@ import {
   sendToConnection,
   sendToConnectionOr,
 } from './sessionRouter';
-
 // The window the user last focused. Used for dialogs and app-level events that
 // are not tied to a particular tab. Null only when every window is closed.
 let mainWindow: BrowserWindow | null = null;

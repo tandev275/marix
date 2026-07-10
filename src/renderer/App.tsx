@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, Suspense } from 'react';
-import { version as APP_VERSION } from '../../package.json';
+import pkg from '../../package.json';
+const APP_VERSION = pkg.version;
 
 const { ipcRenderer } = window.electron;
 import ServerList from './components/ServerList';
 import XTermTerminal from './components/XTermTerminal';
-import RDPViewer from './components/RDPViewer';
 import RDPDepsInstaller from './components/RDPDepsInstaller';
 import AddServerModal from './components/AddServerModal';
 import ThemeSelector from './components/ThemeSelector';
@@ -3834,6 +3834,7 @@ const App: React.FC = () => {
           {/* Settings at bottom */}
           <div className={`p-2 border-t ${appTheme === 'light' ? 'border-gray-200' : 'border-navy-700'}`}>
             <button
+              data-testid="nav-settings"
               onClick={() => { setActiveMenu('settings'); setActiveSessionId(null); }}
               className={`w-full px-3 py-2.5 rounded-lg flex items-center gap-3 transition ${
                 activeMenu === 'settings' && !activeSessionId
@@ -4318,6 +4319,7 @@ const App: React.FC = () => {
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {/* Create Backup */}
                       <button
+                        data-testid="open-backup-create"
                         onClick={() => setBackupModalOpen('create')}
                         className={`flex items-center gap-3 p-3 rounded-lg transition group ${appTheme === 'light' ? 'bg-gray-50 hover:bg-gray-100 border border-gray-200' : 'bg-navy-900 hover:bg-navy-700'}`}
                       >
