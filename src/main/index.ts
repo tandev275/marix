@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, screen } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as dns from 'dns';
@@ -47,7 +47,17 @@ import { appSettings } from './services/AppSettingsStore';
 import { BenchmarkService } from './services/BenchmarkService';
 import { initDatabaseHandlers, getDatabaseConnectionCount, closeAllDatabaseConnections } from './databaseService';
 import buildInfo from './buildInfo';
+import {
+  bindConnection,
+  detachConnection,
+  unbindConnection,
+  connectionsForWebContents,
+  sendToConnection,
+  sendToConnectionOr,
+} from './sessionRouter';
 
+// The window the user last focused. Used for dialogs and app-level events that
+// are not tied to a particular tab. Null only when every window is closed.
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 
@@ -186,12 +196,101 @@ function createTray() {
   });
 }
 
-function createWindow() {
+// ============================================================================
+// MULTI-WINDOW SUPPORT
+// ============================================================================
+// Every window renders the same app shell and owns a subset of the tabs. The
+// backend connections live here in main, keyed by connectionId, so a tab can be
+// handed to another window without dropping its SSH session (see sessionRouter).
+
+const appWindows = new Set<BrowserWindow>();
+
+// Sessions handed to a window that has not booted yet, keyed by webContents.id.
+// The renderer picks them up via 'window:consumePendingSessions' on mount.
+const pendingSessions = new Map<number, any[]>();
+
+// Windows awaiting a close confirmation from their renderer, keyed by requestId.
+const pendingCloseRequests = new Map<number, BrowserWindow>();
+const confirmedClosing = new WeakSet<BrowserWindow>();
+let closeRequestSeq = 0;
+
+/** Send to every open window. For app-level events with no owning tab. */
+function broadcast(channel: string, ...args: any[]) {
+  for (const win of appWindows) {
+    if (!win.isDestroyed()) win.webContents.send(channel, ...args);
+  }
+}
+
+/**
+ * Disconnect the connections owned by one window, leaving other windows alone.
+ * The router holds both SSH and WSS ids; each manager ignores ids it does not own.
+ */
+function closeWindowConnections(win: BrowserWindow) {
+  for (const connectionId of connectionsForWebContents(win.webContents.id)) {
+    sessionMonitor.stopMonitoring(connectionId);
+    try {
+      nativeSSH.disconnect(connectionId);
+    } catch {
+      // Not an SSH connection, or already gone.
+    }
+    try {
+      wssManager.disconnect(connectionId);
+    } catch {
+      // Not a WSS connection, or already gone.
+    }
+    unbindConnection(connectionId);
+  }
+}
+
+function closeAllConnections() {
+  rdpManager.closeAll();
+  nativeSSH.closeAll();
+  sshManager.closeAll();
+  wssManager.closeAll();
+  ftpManager.closeAll();
+  closeAllDatabaseConnections();
+}
+
+// Where to place a spawned window. `dropPoint` is a screen coordinate (from a
+// tab torn off by dragging); we place the window so its tab strip sits under the
+// cursor. Falls back to a cascade offset when no drop point is given.
+function windowPlacement(dropPoint?: { x: number; y: number }): { x?: number; y?: number } {
+  if (dropPoint && Number.isFinite(dropPoint.x) && Number.isFinite(dropPoint.y)) {
+    // Offset so the cursor lands on the dragged tab, not the window corner.
+    let x = Math.round(dropPoint.x - 80);
+    let y = Math.round(dropPoint.y - 14);
+
+    // Keep the title bar reachable: clamp into the work area of the display the
+    // cursor is on, leaving a margin so the window is never dropped off-screen.
+    try {
+      const display = screen.getDisplayNearestPoint({ x: dropPoint.x, y: dropPoint.y });
+      const wa = display.workArea;
+      x = Math.max(wa.x, Math.min(x, wa.x + wa.width - 200));
+      y = Math.max(wa.y, Math.min(y, wa.y + wa.height - 100));
+    } catch {
+      // No display info — use the raw offset.
+    }
+    return { x, y };
+  }
+
+  if (appWindows.size > 0) {
+    // Cascade extra windows so they do not land exactly on their parent.
+    const offset = appWindows.size * 32;
+    return { x: offset, y: offset };
+  }
+  return {};
+}
+
+function createWindow(sessionsToAdopt?: any[], dropPoint?: { x: number; y: number }) {
   const isMac = process.platform === 'darwin';
-  
-  mainWindow = new BrowserWindow({
+
+  const { x, y } = windowPlacement(dropPoint);
+
+  const win = new BrowserWindow({
     width: 1400,
     height: 900,
+    x,
+    y,
     frame: false,
     titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
     trafficLightPosition: isMac ? { x: 12, y: 12 } : undefined,
@@ -207,23 +306,18 @@ function createWindow() {
     show: true,  // Show immediately so boot splash appears early
   });
 
-  // Startup + periodic memory diagnostics
-  mainWindow.once('ready-to-show', () => {
-    // Setup periodic memory cleanup (every 5 minutes)
-    setInterval(() => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        // Trigger renderer garbage collection via low memory signal
-        mainWindow.webContents.session.clearCache();
-        
-        // Log memory usage periodically (debug)
-        const memUsage = process.memoryUsage();
-        console.log(`[Memory] Heap: ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB / ${Math.round(memUsage.heapTotal / 1024 / 1024)}MB, RSS: ${Math.round(memUsage.rss / 1024 / 1024)}MB`);
-      }
-    }, 5 * 60 * 1000); // Every 5 minutes
-  });
+  appWindows.add(win);
+  mainWindow = win;
+
+  if (sessionsToAdopt && sessionsToAdopt.length > 0) {
+    pendingSessions.set(win.webContents.id, sessionsToAdopt);
+  }
+
+  // Dialogs and app-level events target the window the user is looking at.
+  win.on('focus', () => { mainWindow = win; });
 
   // Optimize rendering
-  mainWindow.webContents.on('did-finish-load', () => {
+  win.webContents.on('did-finish-load', () => {
     // Force garbage collection hint
     if (global.gc) {
       global.gc();
@@ -231,74 +325,138 @@ function createWindow() {
   });
 
   if (process.env.NODE_ENV === 'development') {
-    mainWindow.loadURL('http://localhost:8080');
-    mainWindow.webContents.openDevTools();
+    win.loadURL('http://localhost:8080');
+    win.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+    win.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 
-  // Handle close event - ask user if there are active connections
-  // Uses IPC to show custom modal in renderer for smoother UX
-  let isQuitting = false;
-  let closeRequestId = 0;
-  
-  mainWindow.on('close', (event) => {
-    if (isQuitting) return; // Already confirmed, let it close
-    
-    // Check for active connections
-    const activeSSH = nativeSSH.getActiveCount();
-    const activeRDP = rdpManager.getActiveCount();
-    const activeWSS = wssManager.getActiveCount();
-    const activeFTP = ftpManager.getActiveCount();
-    const activeDB = getDatabaseConnectionCount();
-    const totalActive = activeSSH + activeRDP + activeWSS + activeFTP + activeDB;
+  // Ask before closing if this window still holds live connections.
+  // The last window closing tears down everything; an extra window only tears
+  // down the tabs it owns.
+  win.on('close', (event) => {
+    if (confirmedClosing.has(win)) return; // Already confirmed, let it close
 
-    if (totalActive > 0) {
-      event.preventDefault();
-      
-      // Build detail message
-      const details: string[] = [];
+    const isLastWindow = appWindows.size <= 1;
+
+    const details: string[] = [];
+    let totalActive: number;
+
+    if (isLastWindow) {
+      const activeSSH = nativeSSH.getActiveCount();
+      const activeRDP = rdpManager.getActiveCount();
+      const activeWSS = wssManager.getActiveCount();
+      const activeFTP = ftpManager.getActiveCount();
+      const activeDB = getDatabaseConnectionCount();
+      totalActive = activeSSH + activeRDP + activeWSS + activeFTP + activeDB;
+
       if (activeSSH > 0) details.push(`SSH: ${activeSSH}`);
       if (activeRDP > 0) details.push(`RDP: ${activeRDP}`);
       if (activeWSS > 0) details.push(`WebSocket: ${activeWSS}`);
       if (activeFTP > 0) details.push(`FTP: ${activeFTP}`);
       if (activeDB > 0) details.push(`Database: ${activeDB}`);
-      
-      // Send to renderer to show custom modal
-      closeRequestId++;
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('app:confirmClose', {
-          requestId: closeRequestId,
+    } else {
+      const owned = connectionsForWebContents(win.webContents.id);
+      totalActive = owned.length;
+      if (totalActive > 0) details.push(`SSH: ${totalActive}`);
+    }
+
+    if (totalActive > 0) {
+      event.preventDefault();
+
+      closeRequestSeq++;
+      pendingCloseRequests.set(closeRequestSeq, win);
+
+      if (!win.isDestroyed()) {
+        win.webContents.send('app:confirmClose', {
+          requestId: closeRequestSeq,
           totalActive,
           details: details.join(', '),
         });
       }
+      return;
+    }
+
+    // Nothing live in this window, but if it is the last one the app is exiting
+    // and background managers still need to release their handles.
+    if (isLastWindow) closeAllConnections();
+  });
+
+  win.on('closed', () => {
+    appWindows.delete(win);
+    pendingSessions.delete(win.webContents.id);
+    if (mainWindow === win) {
+      mainWindow = appWindows.values().next().value ?? null;
     }
   });
 
-  // Handle close confirmation from renderer
-  ipcMain.on('app:closeConfirmed', (event, requestId: number) => {
-    if (requestId === closeRequestId) {
-      isQuitting = true;
-      rdpManager.closeAll();
-      nativeSSH.closeAll();
-      sshManager.closeAll();
-      wssManager.closeAll();
-      ftpManager.closeAll();
-      closeAllDatabaseConnections();
-      mainWindow?.destroy();
-    }
-  });
-
-  ipcMain.on('app:closeCancelled', (event, requestId: number) => {
-    // User cancelled, do nothing - just log
-    console.log('[App] Close cancelled by user, requestId:', requestId);
-  });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
+  return win;
 }
+
+// Close confirmation comes back from whichever renderer we asked.
+ipcMain.on('app:closeConfirmed', (event, requestId: number) => {
+  const win = pendingCloseRequests.get(requestId);
+  if (!win || win.isDestroyed()) return;
+  pendingCloseRequests.delete(requestId);
+
+  if (appWindows.size <= 1) {
+    closeAllConnections();
+  } else {
+    closeWindowConnections(win);
+  }
+
+  confirmedClosing.add(win);
+  win.destroy();
+});
+
+ipcMain.on('app:closeCancelled', (event, requestId: number) => {
+  pendingCloseRequests.delete(requestId);
+  console.log('[App] Close cancelled by user, requestId:', requestId);
+});
+
+// ---------------------------------------------------------------------------
+// Tab <-> window handoff
+// ---------------------------------------------------------------------------
+
+// Open a new window that adopts the given tabs. The caller has already detached
+// their connections, so their output is buffered until the new window binds.
+ipcMain.handle('window:openWithSessions', async (event, sessions: any[], dropPoint?: { x: number; y: number }) => {
+  try {
+    const list = Array.isArray(sessions) ? sessions : [];
+    for (const session of list) {
+      if (session?.connectionId) detachConnection(session.connectionId);
+    }
+    const win = createWindow(list, dropPoint);
+    return { success: true, windowId: win.id };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+// A freshly booted window claims the tabs it was created with (once).
+ipcMain.handle('window:consumePendingSessions', async (event) => {
+  const sessions = pendingSessions.get(event.sender.id) ?? [];
+  pendingSessions.delete(event.sender.id);
+  return sessions;
+});
+
+// Route these connections' output to the calling window, flushing what was
+// buffered while the tab was in flight.
+ipcMain.handle('session:rebind', async (event, connectionIds: string[]) => {
+  for (const connectionId of connectionIds ?? []) {
+    bindConnection(connectionId, event.sender);
+  }
+  return { success: true };
+});
+
+// Stop routing output to this window without killing the connection. Called by
+// the source window when a tab leaves it.
+ipcMain.handle('session:detach', async (event, connectionIds: string[]) => {
+  for (const connectionId of connectionIds ?? []) {
+    detachConnection(connectionId);
+  }
+  return { success: true };
+});
 
 app.whenReady().then(() => {
   // Register protocol handler for OAuth callbacks
@@ -324,6 +482,17 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   createAppMenu();
+
+  // Periodic memory cleanup. App-level, not per-window: the HTTP cache is shared
+  // across windows, so one timer is enough no matter how many are open.
+  setInterval(() => {
+    const win = mainWindow;
+    if (win && !win.isDestroyed()) {
+      win.webContents.session.clearCache();
+    }
+    const memUsage = process.memoryUsage();
+    console.log(`[Memory] Heap: ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB / ${Math.round(memUsage.heapTotal / 1024 / 1024)}MB, RSS: ${Math.round(memUsage.rss / 1024 / 1024)}MB`);
+  }, 5 * 60 * 1000); // Every 5 minutes
   
   // Initialize database handlers
   initDatabaseHandlers();
@@ -931,29 +1100,32 @@ ipcMain.handle('local:copyDir', (_, srcPath: string, destPath: string) => {
   }
 });
 
-// Window control handlers
-ipcMain.handle('window:minimize', () => {
-  mainWindow?.minimize();
+// Window control handlers - act on the window that sent the request, not the
+// focused one, so title-bar buttons work in every window.
+ipcMain.handle('window:minimize', (event) => {
+  BrowserWindow.fromWebContents(event.sender)?.minimize();
 });
 
-ipcMain.handle('window:maximize', () => {
-  if (mainWindow?.isMaximized()) {
-    mainWindow.unmaximize();
+ipcMain.handle('window:maximize', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return;
+  if (win.isMaximized()) {
+    win.unmaximize();
   } else {
-    mainWindow?.maximize();
+    win.maximize();
   }
 });
 
-ipcMain.handle('window:close', () => {
-  mainWindow?.close();
+ipcMain.handle('window:close', (event) => {
+  BrowserWindow.fromWebContents(event.sender)?.close();
 });
 
 // Reset window focus (refocus webContents to fix input responsiveness)
 // Uses sendInputEvent to release any stuck modifier keys without blurring the window
-ipcMain.handle('window:resetFocus', async () => {
-  if (mainWindow) {
-    const wc = mainWindow.webContents;
-    
+ipcMain.handle('window:resetFocus', async (event) => {
+  {
+    const wc = event.sender;
+
     // Send keyUp events for all modifier keys to release any stuck state
     // This is more reliable than blur/focus which minimizes the window
     const modifiers: Array<'Control' | 'Shift' | 'Alt' | 'Meta'> = ['Control', 'Shift', 'Alt', 'Meta'];
@@ -1013,24 +1185,24 @@ ipcMain.handle('ssh:connect', async (event, config) => {
     }
     
     // Helper to setup event forwarding
+    // Output is addressed to the connection, not to this window: the tab may be
+    // moved to another window later, and the router follows it.
     const setupEventForwarding = (connectionId: string, emitter: any) => {
+      bindConnection(connectionId, event.sender);
+
       const dataHandler = (data: string | Buffer) => {
-        if (event.sender && !event.sender.isDestroyed()) {
-          event.sender.send('ssh:shellData', connectionId, data);
-        }
+        sendToConnection(connectionId, 'ssh:shellData', connectionId, data);
         // Track bytes received (download) for session monitor
         const bytes = typeof data === 'string' ? Buffer.byteLength(data, 'utf8') : data.length;
         sessionMonitor.recordBytesReceived(connectionId, bytes);
       };
-      
+
       const closeHandler = () => {
-        if (event.sender && !event.sender.isDestroyed()) {
-          event.sender.send('ssh:shellClose', connectionId);
-        }
+        sendToConnection(connectionId, 'ssh:shellClose', connectionId);
         // Mark session as disconnected
         sessionMonitor.markDisconnected(connectionId);
       };
-      
+
       emitter.on('data', dataHandler);
       emitter.on('close', closeHandler);
     };
@@ -1094,23 +1266,21 @@ ipcMain.handle('ssh:connect', async (event, config) => {
 ipcMain.handle('local:createShell', async (event, cols, rows) => {
   try {
     const { connectionId, emitter } = nativeSSH.createLocalShell(cols, rows);
-    
-    // Setup data forwarding to renderer
+
+    // Route by connectionId so the tab keeps its shell when moved between windows
+    bindConnection(connectionId, event.sender);
+
     const dataHandler = (data: string) => {
-      if (event.sender && !event.sender.isDestroyed()) {
-        event.sender.send('ssh:shellData', connectionId, data);
-      }
+      sendToConnection(connectionId, 'ssh:shellData', connectionId, data);
     };
-    
+
     const closeHandler = () => {
-      if (event.sender && !event.sender.isDestroyed()) {
-        event.sender.send('ssh:shellClose', connectionId);
-      }
+      sendToConnection(connectionId, 'ssh:shellClose', connectionId);
     };
-    
+
     emitter.on('data', dataHandler);
     emitter.on('close', closeHandler);
-    
+
     return { success: true, connectionId };
   } catch (error: any) {
     return { success: false, error: error.message };
@@ -1178,6 +1348,7 @@ ipcMain.handle('local:getOsInfo', async () => {
 ipcMain.handle('ssh:closeShell', async (event, connectionId) => {
   try {
     nativeSSH.disconnect(connectionId);
+    unbindConnection(connectionId);
     return { success: true };
   } catch (error: any) {
     return { success: false, error: error.message };
@@ -1189,6 +1360,7 @@ ipcMain.handle('ssh:disconnect', async (event, connectionId) => {
     // Stop session monitoring
     sessionMonitor.stopMonitoring(connectionId);
     nativeSSH.disconnect(connectionId);
+    unbindConnection(connectionId);
     await sshManager.disconnect(connectionId).catch(() => {});
     return { success: true };
   } catch (error: any) {
@@ -1376,17 +1548,13 @@ ipcMain.handle('settings:clearAppLockCredential', async () => {
   return { success: true };
 });
 
-// Forward session monitor updates to renderer
+// Forward session monitor updates to the window owning that connection
 sessionMonitor.on('update', (data: SessionMonitorData) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('session-monitor:update', data);
-  }
+  sendToConnectionOr(data.connectionId, mainWindow?.webContents ?? null, 'session-monitor:update', data);
 });
 
 sessionMonitor.on('session-closed', (connectionId: string) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('session-monitor:closed', connectionId);
-  }
+  sendToConnectionOr(connectionId, mainWindow?.webContents ?? null, 'session-monitor:closed', connectionId);
 });
 
 // ============================================================================
@@ -2014,26 +2182,28 @@ ipcMain.handle('rdp:unicode', async (event, connectionId, code, isPressed) => {
 
 // ===================== WSS (WebSocket Secure) Handlers =====================
 
-// Setup WSS event listeners once
+// Setup WSS event listeners once - routed to the window owning the WSS tab
 wssManager.on('connect', (connectionId: string) => {
-  mainWindow?.webContents.send('wss:connect', connectionId);
+  sendToConnectionOr(connectionId, mainWindow?.webContents ?? null, 'wss:connect', connectionId);
 });
 
 wssManager.on('message', (connectionId: string, message: string) => {
   console.log(`[Main] Forwarding WSS message to renderer: ${connectionId}`);
-  mainWindow?.webContents.send('wss:message', connectionId, message);
+  sendToConnectionOr(connectionId, mainWindow?.webContents ?? null, 'wss:message', connectionId, message);
 });
 
 wssManager.on('close', (connectionId: string, code: number, reason: string) => {
-  mainWindow?.webContents.send('wss:close', connectionId, code, reason);
+  sendToConnectionOr(connectionId, mainWindow?.webContents ?? null, 'wss:close', connectionId, code, reason);
 });
 
 wssManager.on('error', (connectionId: string, error: string) => {
-  mainWindow?.webContents.send('wss:error', connectionId, error);
+  sendToConnectionOr(connectionId, mainWindow?.webContents ?? null, 'wss:error', connectionId, error);
 });
 
 ipcMain.handle('wss:connect', async (event, connectionId, config) => {
   try {
+    // Bind before connecting: the manager can emit 'connect' synchronously
+    bindConnection(connectionId, event.sender);
     // connect() is now async and waits for connection result
     const result = await wssManager.connect(connectionId, config);
     return result;
@@ -2055,6 +2225,7 @@ ipcMain.handle('wss:send', async (event, connectionId, message) => {
 ipcMain.handle('wss:disconnect', async (event, connectionId) => {
   try {
     wssManager.disconnect(connectionId);
+    unbindConnection(connectionId);
     return { success: true };
   } catch (error: any) {
     console.error('[Main] wss:disconnect error:', error);
@@ -3281,9 +3452,7 @@ ipcMain.handle('tools:portListener', async () => {
 
 // Port Forwarding handlers
 portForwardingService.on('status', (config: any) => {
-  if (mainWindow) {
-    mainWindow.webContents.send('portforward:status', config);
-  }
+  broadcast('portforward:status', config);
 });
 
 ipcMain.handle('portforward:create', async (event, config: any) => {
@@ -3505,23 +3674,23 @@ ipcMain.handle('lan-share:sendAck', (event, peerId: string, data: any) => {
 
 // Setup event forwarding to renderer
 lanSharingService.on('peer-found', (peer: any) => {
-  mainWindow?.webContents.send('lan-share:peer-found', peer);
+  broadcast('lan-share:peer-found', peer);
 });
 
 lanSharingService.on('peer-lost', (peerId: string) => {
-  mainWindow?.webContents.send('lan-share:peer-lost', peerId);
+  broadcast('lan-share:peer-lost', peerId);
 });
 
 lanSharingService.on('share-received', (data: any) => {
-  mainWindow?.webContents.send('lan-share:share-received', data);
+  broadcast('lan-share:share-received', data);
 });
 
 lanSharingService.on('share-request', (data: any) => {
-  mainWindow?.webContents.send('lan-share:share-request', data);
+  broadcast('lan-share:share-request', data);
 });
 
 lanSharingService.on('share-ack', (data: any) => {
-  mainWindow?.webContents.send('lan-share:ack-received', data);
+  broadcast('lan-share:ack-received', data);
 });
 
 // ==================== LAN File Transfer ====================
@@ -3593,39 +3762,39 @@ ipcMain.handle('file-transfer:selectSaveLocation', async () => {
 
 // Event forwarding for file transfer
 lanFileTransferService.on('transfer-request', (data: any) => {
-  mainWindow?.webContents.send('file-transfer:request', data);
+  broadcast('file-transfer:request', data);
 });
 
 lanFileTransferService.on('transfer-waiting', (data: any) => {
-  mainWindow?.webContents.send('file-transfer:waiting', data);
+  broadcast('file-transfer:waiting', data);
 });
 
 lanFileTransferService.on('transfer-connected', (data: any) => {
-  mainWindow?.webContents.send('file-transfer:connected', data);
+  broadcast('file-transfer:connected', data);
 });
 
 lanFileTransferService.on('transfer-fileinfo', (data: any) => {
-  mainWindow?.webContents.send('file-transfer:fileinfo', data);
+  broadcast('file-transfer:fileinfo', data);
 });
 
 lanFileTransferService.on('transfer-started', (data: any) => {
-  mainWindow?.webContents.send('file-transfer:started', data);
+  broadcast('file-transfer:started', data);
 });
 
 lanFileTransferService.on('transfer-progress', (data: any) => {
-  mainWindow?.webContents.send('file-transfer:progress', data);
+  broadcast('file-transfer:progress', data);
 });
 
 lanFileTransferService.on('transfer-completed', (data: any) => {
-  mainWindow?.webContents.send('file-transfer:completed', data);
+  broadcast('file-transfer:completed', data);
 });
 
 lanFileTransferService.on('transfer-error', (data: any) => {
-  mainWindow?.webContents.send('file-transfer:error', data);
+  broadcast('file-transfer:error', data);
 });
 
 lanFileTransferService.on('transfer-cancelled', (data: any) => {
-  mainWindow?.webContents.send('file-transfer:cancelled', data);
+  broadcast('file-transfer:cancelled', data);
 });
 
 // ==================== Find Sender by Code ====================
@@ -3644,5 +3813,5 @@ ipcMain.handle('file-transfer:setActivePairingCode', async (event, code: string 
 
 // Event forwarding when sender is found via LAN broadcast
 lanSharingService.on('sender-found', (data: any) => {
-  mainWindow?.webContents.send('file-transfer:sender-found', data);
+  broadcast('file-transfer:sender-found', data);
 });

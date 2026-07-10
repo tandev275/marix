@@ -262,6 +262,13 @@ const App: React.FC = () => {
   // Tab drag state
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
+  // Connections adopted from another window, waiting to be bound to this one
+  const [pendingRebind, setPendingRebind] = useState<string[] | null>(null);
+  // Tab right-click menu
+  const [tabContextMenu, setTabContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
+  // Tab strip element, used to decide whether a drag ended inside it (reorder) or
+  // outside (tear the tab off into its own window)
+  const tabStripRef = useRef<HTMLDivElement>(null);
   
   // RDP connecting overlay state
   const [rdpConnecting, setRdpConnecting] = useState<{ server: Server; status: 'connecting' | 'error'; error?: string } | null>(null);
@@ -449,6 +456,29 @@ const App: React.FC = () => {
       ipcRenderer.removeListener('app:confirmClose', handleConfirmClose);
     };
   }, []);
+
+  // Adopt tabs this window was opened with (a tab detached from another window).
+  // The connections are already live in main and buffering their output.
+  useEffect(() => {
+    (async () => {
+      const adopted: Session[] = await ipcRenderer.invoke('window:consumePendingSessions');
+      if (!adopted || adopted.length === 0) return;
+
+      setSessions(adopted);
+      setActiveSessionId(adopted[0].id);
+      setSidebarOpen(false);
+      setPendingRebind(adopted.map(s => s.connectionId));
+    })();
+  }, []);
+
+  // Claim the adopted connections only once their terminals exist. Binding flushes
+  // the output buffered during the move, so the xterm listeners must be attached
+  // first — child effects run before this one on the same commit.
+  useEffect(() => {
+    if (!pendingRebind) return;
+    ipcRenderer.invoke('session:rebind', pendingRebind);
+    setPendingRebind(null);
+  }, [pendingRebind]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -3135,6 +3165,37 @@ const App: React.FC = () => {
     }
   };
 
+  // Move a tab out of this window into a new one, without dropping its SSH session.
+  // The connection lives in main keyed by connectionId; we hand over the tab and
+  // let the new window rebind it. Only terminal tabs for now — RDP/SFTP/DB tabs
+  // hold renderer-side state that does not survive the move.
+  const handleDetachSession = async (id: string, dropPoint?: { x: number; y: number }) => {
+    const session = sessions.find(s => s.id === id);
+    if (!session || session.type !== 'terminal') return;
+    if (sessions.length <= 1) return; // Nothing gained by emptying this window
+
+    setTabContextMenu(null);
+
+    // Stop routing output here before tearing down the local xterm, so bytes
+    // emitted during the handover are buffered in main rather than dropped.
+    await ipcRenderer.invoke('session:detach', [session.connectionId]);
+
+    // Dispose the local xterm and its IPC listeners. This does NOT touch the
+    // backend connection — unlike doCloseSession, which also disconnects.
+    destroyTerminal(session.connectionId);
+
+    const remaining = sessions.filter(s => s.id !== id);
+    setSessions(remaining);
+    if (activeSessionId === id) {
+      setActiveSessionId(remaining[0]?.id || null);
+    }
+
+    const result = await ipcRenderer.invoke('window:openWithSessions', [session], dropPoint);
+    if (!result?.success) {
+      console.error('[App] Failed to detach tab:', result?.error);
+    }
+  };
+
   // Handle close session request - show custom confirm modal instead of window.confirm()
   const handleCloseSession = async (id: string, skipConfirm = false) => {
     const session = sessions.find(s => s.id === id);
@@ -3312,6 +3373,7 @@ const App: React.FC = () => {
         {/* Sidebar toggle + App name - not draggable */}
         <div className="flex items-center h-full" style={{ WebkitAppRegion: 'no-drag' } as any}>
           <button
+            data-testid="toggle-sidebar"
             onClick={() => setSidebarOpen(!sidebarOpen)}
             className="w-10 h-full flex items-center justify-center hover:bg-navy-700 transition text-gray-400 hover:text-white"
             title={sidebarOpen ? t('hideSidebar') : t('showSidebar')}
@@ -3345,7 +3407,7 @@ const App: React.FC = () => {
         </div>
         
         {/* Tabs - not draggable for window, but draggable for reordering */}
-        <div className="flex items-center h-full overflow-x-auto" style={{ WebkitAppRegion: 'no-drag' } as any}>
+        <div ref={tabStripRef} className="flex items-center h-full overflow-x-auto" style={{ WebkitAppRegion: 'no-drag' } as any}>
           {sessions.map(session => {
             const protocol = session.server.protocol || 'ssh';
             const protocolConfig = {
@@ -3366,6 +3428,7 @@ const App: React.FC = () => {
             return (
               <div
                 key={session.id}
+                data-testid="session-tab"
                 draggable
                 onDragStart={(e) => {
                   setDraggedTabId(session.id);
@@ -3374,9 +3437,29 @@ const App: React.FC = () => {
                   setTimeout(() => (e.target as HTMLElement).classList.add('opacity-50'), 0);
                 }}
                 onDragEnd={(e) => {
+                  const draggedId = draggedTabId;
                   setDraggedTabId(null);
                   setDragOverTabId(null);
                   (e.target as HTMLElement).classList.remove('opacity-50');
+
+                  if (!draggedId) return;
+
+                  // A drag that ends inside the tab strip was a reorder (or a
+                  // no-op), already handled by onDrop. One that ends below or
+                  // outside the strip means the user pulled the tab off — give it
+                  // its own window at the drop point.
+                  const strip = tabStripRef.current;
+                  let inStrip = false;
+                  if (strip) {
+                    const r = strip.getBoundingClientRect();
+                    inStrip =
+                      e.clientX >= r.left && e.clientX <= r.right &&
+                      e.clientY >= r.top && e.clientY <= r.bottom;
+                  }
+
+                  if (!inStrip) {
+                    handleDetachSession(draggedId, { x: e.screenX, y: e.screenY });
+                  }
                 }}
                 onDragOver={(e) => {
                   e.preventDefault();
@@ -3401,6 +3484,11 @@ const App: React.FC = () => {
                   setDragOverTabId(null);
                 }}
                 onClick={() => setActiveSessionId(session.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setActiveSessionId(session.id);
+                  setTabContextMenu({ sessionId: session.id, x: e.clientX, y: e.clientY });
+                }}
                 className={`group flex items-center gap-2 px-3 h-full border-r cursor-pointer transition text-xs ${
                   dragOverTabId === session.id
                     ? 'border-teal-400 border-l-2 bg-teal-500/10'
@@ -3464,6 +3552,49 @@ const App: React.FC = () => {
           </button>
         </div>
         
+        {/* Tab context menu */}
+        {tabContextMenu && (() => {
+          const session = sessions.find(s => s.id === tabContextMenu.sessionId);
+          const canDetach = session?.type === 'terminal' && sessions.length > 1;
+          return (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setTabContextMenu(null)}
+                onContextMenu={(e) => { e.preventDefault(); setTabContextMenu(null); }}
+                style={{ WebkitAppRegion: 'no-drag' } as any}
+              />
+              <div
+                className="fixed z-50 min-w-[190px] py-1 rounded-md border border-navy-700 bg-navy-800 shadow-lg text-xs"
+                style={{ left: tabContextMenu.x, top: tabContextMenu.y, WebkitAppRegion: 'no-drag' } as any}
+              >
+                <button
+                  data-testid="detach-tab"
+                  disabled={!canDetach}
+                  onClick={() => handleDetachSession(tabContextMenu.sessionId)}
+                  className={`w-full text-left px-3 py-2 transition ${
+                    canDetach
+                      ? 'text-gray-200 hover:bg-navy-700 hover:text-white'
+                      : 'text-gray-600 cursor-not-allowed'
+                  }`}
+                >
+                  {t('moveTabToNewWindow')}
+                </button>
+                <button
+                  onClick={() => {
+                    const id = tabContextMenu.sessionId;
+                    setTabContextMenu(null);
+                    handleCloseSession(id);
+                  }}
+                  className="w-full text-left px-3 py-2 text-gray-200 hover:bg-navy-700 hover:text-red-400 transition"
+                >
+                  {t('closeTab')}
+                </button>
+              </div>
+            </>
+          );
+        })()}
+
         {/* Draggable spacer for macOS */}
         <div className="flex-1 h-full min-w-[50px]" style={{ WebkitAppRegion: 'drag' } as any} />
 
@@ -3542,6 +3673,7 @@ const App: React.FC = () => {
           {/* Menu Items */}
           <div className="flex-1 py-3 px-2 overflow-y-auto">
             <button
+              data-testid="nav-hosts"
               onClick={() => { setActiveMenu('hosts'); setActiveSessionId(null); setActiveTag(null); }}
               className={`w-full px-3 py-2.5 rounded-lg flex items-center gap-3 mb-1 transition ${
                 activeMenu === 'hosts' && !activeSessionId
@@ -3736,6 +3868,7 @@ const App: React.FC = () => {
                   </div>
                   <div className="flex items-center gap-2">
                     <button
+                      data-testid="open-local-terminal"
                       onClick={() => openLocalTerminal()}
                       className={`px-4 py-2 text-sm font-medium rounded-lg transition shadow-sm flex items-center gap-2 ${appTheme === 'light' ? 'bg-gray-200 hover:bg-gray-300 text-gray-700' : 'bg-navy-700 hover:bg-navy-600 text-white'}`}
                     >

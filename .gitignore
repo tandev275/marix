@@ -8,3 +8,7 @@ release
 src/main/services/google-credentials.json
 src/main/services/box-credentials.json
 src/main/services/onedrive-credentials.json
+
+# Playwright artifacts
+test-results/
+playwright-report/

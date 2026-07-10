@@ -52,6 +52,7 @@ export interface Translations {
   noServers: string;
   searchServers: string;
   quickConnect: string;
+  moveTabToNewWindow: string;
   noMatchingHosts: string;
   tryDifferentSearch: string;
   noHostsConfigured: string;
