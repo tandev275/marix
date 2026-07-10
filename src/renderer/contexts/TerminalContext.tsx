@@ -61,7 +61,11 @@ export const TerminalProvider: React.FC<{ children: ReactNode }> = ({ children }
     const fontString = `"${fontFamily}", "JetBrains Mono", "Fira Code", monospace`;
     terminalsRef.current.forEach((instance, connId) => {
       instance.xterm.options.fontFamily = fontString;
-      instance.fitAddon.fit(); // Refit after font change
+      // Hidden terminals (display:none) measure 0x0; fitting them collapses the
+      // buffer. They refit via their own ResizeObserver when shown again.
+      if (instance.element.offsetWidth && instance.element.offsetHeight) {
+        instance.fitAddon.fit(); // Refit after font change
+      }
       console.log('[TerminalContext] Applied font:', fontFamily, 'to', connId);
     });
   };

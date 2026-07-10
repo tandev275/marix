@@ -32,6 +32,7 @@ const XTermTerminal: React.FC<Props> = ({ connectionId, theme = 'Dracula', serve
   const wrapperRef = useRef<HTMLDivElement>(null);
   const { getTerminal, createTerminal, applyTheme } = useTerminalContext();
   const instanceRef = useRef<any>(null);
+  const lastSizeRef = useRef<{ cols: number; rows: number }>({ cols: 0, rows: 0 });
   const [bgColor, setBgColor] = useState('#282a36'); // Default Dracula background
   const [snippetPanelCollapsed, setSnippetPanelCollapsed] = useState(false);
   const [snippetPanelVisible, setSnippetPanelVisible] = useState(showSnippetPanel);
@@ -122,25 +123,37 @@ const XTermTerminal: React.FC<Props> = ({ connectionId, theme = 'Dracula', serve
     });
   }, [theme]);
 
+  // Fitting a terminal whose container is hidden (display:none => 0x0) collapses
+  // the buffer to the minimum cols/rows and corrupts the rendered output.
+  const fitIfVisible = useCallback(() => {
+    const instance = instanceRef.current;
+    const container = containerRef.current;
+    if (!instance || !container) return;
+    if (!container.offsetWidth || !container.offsetHeight) return;
+
+    instance.fitAddon.fit();
+    if (!instance.isReady) return;
+
+    const { cols, rows } = instance.xterm;
+    if (cols === lastSizeRef.current.cols && rows === lastSizeRef.current.rows) return;
+    lastSizeRef.current = { cols, rows };
+    ipcRenderer.invoke('ssh:resizeShell', connectionId, cols, rows);
+  }, [connectionId]);
+
   useEffect(() => {
     if (!containerRef.current) return;
 
     // Check if terminal already exists
     let instance = getTerminal(connectionId);
-    
+
     if (instance) {
       // Reattach existing terminal
       console.log('[XTermTerminal] Reattaching terminal:', connectionId);
       containerRef.current.appendChild(instance.element);
-      
+
       // Refit and send size to SSH
-      setTimeout(() => {
-        instance!.fitAddon.fit();
-        const { cols, rows } = instance!.xterm;
-        console.log('[XTermTerminal] Refit size:', cols, 'x', rows);
-        ipcRenderer.invoke('ssh:resizeShell', connectionId, cols, rows);
-      }, 100);
-      
+      setTimeout(() => fitIfVisible(), 100);
+
       instanceRef.current = instance;
     } else {
       // Create new terminal with theme and config for auto-reconnect
@@ -162,26 +175,26 @@ const XTermTerminal: React.FC<Props> = ({ connectionId, theme = 'Dracula', serve
 
     // Handle window resize
     const handleResize = () => {
-      if (instanceRef.current) {
-        instanceRef.current.fitAddon.fit();
-        if (instanceRef.current.isReady) {
-          const { cols, rows } = instanceRef.current.xterm;
-          ipcRenderer.invoke('ssh:resizeShell', connectionId, cols, rows);
-        }
-      }
+      fitIfVisible();
     };
 
     window.addEventListener('resize', handleResize);
 
+    // Refit when the container gets its size back (tab switched from display:none
+    // to visible, snippet panel toggled, ...)
+    const observer = new ResizeObserver(() => fitIfVisible());
+    observer.observe(containerRef.current);
+
     return () => {
       window.removeEventListener('resize', handleResize);
-      
+      observer.disconnect();
+
       // Detach but don't destroy
       if (instanceRef.current && instanceRef.current.element.parentElement) {
         instanceRef.current.element.parentElement.removeChild(instanceRef.current.element);
       }
     };
-  }, [connectionId]);
+  }, [connectionId, fitIfVisible]);
 
   // Apply theme when it changes
   useEffect(() => {
@@ -193,13 +206,23 @@ const XTermTerminal: React.FC<Props> = ({ connectionId, theme = 'Dracula', serve
   // Global hotkey handler for this terminal instance
   useEffect(() => {
     const handleGlobalHotkey = (e: KeyboardEvent) => {
-      // Only handle if this terminal's container is in the DOM and visible
+      // Only handle if this terminal's container is in the DOM and visible.
+      // Background tabs stay mounted behind display:none and must not swallow keys.
       if (!wrapperRef.current || !document.body.contains(wrapperRef.current)) return;
-      
+      if (!wrapperRef.current.offsetWidth || !wrapperRef.current.offsetHeight) return;
+
       // Check if terminal container or its children have focus
       const activeElement = document.activeElement;
       const isTerminalFocused = wrapperRef.current.contains(activeElement);
-      
+
+      // Typing into any other editable surface (SFTP file editor, search boxes, ...)
+      // must keep its own key handling.
+      const target = e.target as HTMLElement | null;
+      const isEditingElsewhere = !isTerminalFocused && !!target?.closest?.(
+        'input, textarea, select, [contenteditable="true"], .cm-editor'
+      );
+      if (isEditingElsewhere) return;
+
       // Tab key for Command Recall Panel toggle (when input is empty)
       // Allow Tab to work even if terminal isn't focused (as long as it's visible)
       if (e.key === 'Tab' && !e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
