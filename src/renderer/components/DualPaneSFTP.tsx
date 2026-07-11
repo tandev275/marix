@@ -719,8 +719,8 @@ const DualPaneSFTP: React.FC<Props> = ({ connectionId, server, initialLocalPath,
     }
   };
 
-  const uploadFile = async (name: string) => {
-    const localFilePath = await ipcRenderer.invoke('local:pathJoin', localPath, name);
+  const uploadFile = async (name: string, srcPathOverride?: string) => {
+    const localFilePath = srcPathOverride || await ipcRenderer.invoke('local:pathJoin', localPath, name);
     const remoteFilePath = remotePath === '/' ? `/${name}` : `${remotePath}/${name}`;
     
     // Check if file exists on remote
@@ -750,8 +750,8 @@ const DualPaneSFTP: React.FC<Props> = ({ connectionId, server, initialLocalPath,
   };
 
   // Upload folder with progress
-  const uploadFolder = async (name: string) => {
-    const localFilePath = await ipcRenderer.invoke('local:pathJoin', localPath, name);
+  const uploadFolder = async (name: string, srcPathOverride?: string) => {
+    const localFilePath = srcPathOverride || await ipcRenderer.invoke('local:pathJoin', localPath, name);
     const remoteFilePath = remotePath === '/' ? `/${name}` : `${remotePath}/${name}`;
     
     try {
@@ -784,13 +784,24 @@ const DualPaneSFTP: React.FC<Props> = ({ connectionId, server, initialLocalPath,
     }
   };
 
-  // Upload any item (file or folder)
-  const uploadItem = async (name: string, isDirectory: boolean) => {
+  // Upload any item (file or folder). srcPathOverride uploads from an arbitrary
+  // location (a file dropped from outside the app) instead of the local pane.
+  const uploadItem = async (name: string, isDirectory: boolean, srcPathOverride?: string) => {
     if (isDirectory) {
-      await uploadFolder(name);
+      await uploadFolder(name, srcPathOverride);
     } else {
-      await uploadFile(name);
+      await uploadFile(name, srcPathOverride);
     }
+  };
+
+  // Absolute path of a File dropped from the OS. Electron 32+ removed File.path,
+  // so prefer the preload's getPathForFile; fall back for older builds.
+  const getDroppedFilePath = (file: File): string => {
+    try {
+      const p = (window.electron as any)?.getPathForFile?.(file);
+      if (p) return p;
+    } catch { /* fall through */ }
+    return (file as any).path || '';
   };
 
 
@@ -1326,8 +1337,9 @@ const DualPaneSFTP: React.FC<Props> = ({ connectionId, server, initialLocalPath,
   const handleRemoteDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    // Accept drops from local pane only (for now)
-    if (draggingFile?.from === 'local') {
+    // Accept drops from the local pane, or files dragged in from the OS.
+    const externalFiles = e.dataTransfer.types.includes('Files');
+    if (draggingFile?.from === 'local' || externalFiles) {
       e.dataTransfer.dropEffect = 'copy';
       setRemoteDragOver(true);
     }
@@ -1354,17 +1366,26 @@ const DualPaneSFTP: React.FC<Props> = ({ connectionId, server, initialLocalPath,
     }
     // Handle external file drop (from OS file manager)
     else if (e.dataTransfer.files.length > 0) {
-      const files = Array.from(e.dataTransfer.files);
-      for (const file of files) {
-        const destPath = await ipcRenderer.invoke('local:pathJoin', localPath, file.name);
+      // Resolve paths synchronously — the FileList is cleared after the first await.
+      const dropped = Array.from(e.dataTransfer.files).map(f => ({ name: f.name, path: getDroppedFilePath(f) }));
+      for (const item of dropped) {
+        const destPath = await ipcRenderer.invoke('local:pathJoin', localPath, item.name);
         try {
-          // In Electron, File object has path property (not in standard web)
-          const srcPath = (file as any).path as string;
-          if (srcPath && srcPath !== destPath) {
-            await ipcRenderer.invoke('local:copyFile', srcPath, destPath);
+          const srcPath = item.path;
+          if (!srcPath) {
+            alert(`Cannot copy "${item.name}": could not resolve its path.`);
+            continue;
+          }
+          if (srcPath !== destPath) {
+            const st = await ipcRenderer.invoke('local:stat', srcPath);
+            if (st?.success && st.isDirectory) {
+              await ipcRenderer.invoke('local:copyDir', srcPath, destPath);
+            } else {
+              await ipcRenderer.invoke('local:copyFile', srcPath, destPath);
+            }
           }
         } catch (err: any) {
-          alert(`Failed to copy ${file.name}: ${err.message}`);
+          alert(`Failed to copy ${item.name}: ${err.message}`);
         }
       }
       loadLocalFiles(localPath);
@@ -1377,13 +1398,29 @@ const DualPaneSFTP: React.FC<Props> = ({ connectionId, server, initialLocalPath,
     e.preventDefault();
     e.stopPropagation();
     setRemoteDragOver(false);
-    
-    // Handle drop from local pane
+
+    // Drop from the local pane → upload that item.
     if (draggingFile?.from === 'local') {
       await uploadItem(draggingFile.name, draggingFile.isDirectory);
+      setDraggingFile(null);
+      return;
     }
-    
+
+    // Drop from the OS file manager → upload each dropped file/folder to remote.
+    // Read the FileList synchronously; it is cleared once the handler awaits.
+    const dropped = Array.from(e.dataTransfer.files).map(f => ({ name: f.name, path: getDroppedFilePath(f) }));
     setDraggingFile(null);
+    if (dropped.length === 0) return;
+
+    for (const item of dropped) {
+      if (!item.path) {
+        alert(`Cannot upload "${item.name}": could not resolve its path.`);
+        continue;
+      }
+      const st = await ipcRenderer.invoke('local:stat', item.path);
+      const isDirectory = !!(st?.success && st.isDirectory);
+      await uploadItem(item.name, isDirectory, item.path);
+    }
   };
 
   const formatSize = (bytes: number) => {

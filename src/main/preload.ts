@@ -1,5 +1,5 @@
 // Preload script - Expose IPC to renderer
-const { contextBridge, ipcRenderer, shell } = require('electron');
+const { contextBridge, ipcRenderer, shell, webUtils } = require('electron');
 
 // Map to store listener references to prevent memory leaks
 // Key: original callback, Value: wrapped callback
@@ -8,6 +8,15 @@ const listeners = new Map<Function, Function>();
 contextBridge.exposeInMainWorld('electron', {
   shell: {
     openExternal: (url: string) => shell.openExternal(url),
+  },
+  // Resolve the absolute path of a File dropped from the OS. File.path was
+  // removed in Electron 32+, so getPathForFile is the only way to get it.
+  getPathForFile: (file: File): string => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      return '';
+    }
   },
   ipcRenderer: {
     invoke: (channel: string, ...args: any[]) => ipcRenderer.invoke(channel, ...args),
