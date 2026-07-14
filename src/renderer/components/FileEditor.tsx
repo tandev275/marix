@@ -238,6 +238,37 @@ const getLanguageExtension = (filename: string) => {
   }
 };
 
+// Fallback comment tokens for files that have no CodeMirror language extension
+// (nginx.conf, .ini, .toml, shell scripts, Dockerfile, .env, ...). These mostly
+// use `#` line comments, so Ctrl+/ still works even without full language support.
+const getFallbackCommentTokens = (filename: string): { line: string } | null => {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  const lowerName = filename.toLowerCase();
+
+  if (lowerName === 'dockerfile') return { line: '#' };
+  if (lowerName === 'makefile') return { line: '#' };
+  if (lowerName.startsWith('.env')) return { line: '#' };
+
+  switch (ext) {
+    case 'conf':
+    case 'nginx':
+    case 'cfg':
+    case 'ini':
+    case 'toml':
+    case 'properties':
+    case 'sh':
+    case 'bash':
+    case 'zsh':
+    case 'fish':
+    case 'env':
+    case 'gitignore':
+    case 'dockerignore':
+      return { line: '#' };
+    default:
+      return null;
+  }
+};
+
 // Get language label for display
 const getLanguageLabel = (filename: string): string => {
   const ext = filename.split('.').pop()?.toLowerCase() || '';
@@ -346,7 +377,11 @@ const FileEditor: React.FC<Props> = ({
     console.log('[FileEditor] Initializing CodeMirror editor');
     
     const languageExtension = getLanguageExtension(fileName);
-    
+    const fallbackCommentTokens = getFallbackCommentTokens(fileName);
+    const commentExtension = fallbackCommentTokens
+      ? [EditorState.languageData.of(() => [{ commentTokens: fallbackCommentTokens }])]
+      : [];
+
     const updateListener = EditorView.updateListener.of((update) => {
       if (update.docChanged) {
         const newContent = update.state.doc.toString();
@@ -389,6 +424,7 @@ const FileEditor: React.FC<Props> = ({
             indentWithTab,
           ]),
           ...languageExtension,
+          ...commentExtension,
           vscodeDarkTheme,
           syntaxHighlighting(vscodeDarkHighlight),
           updateListener,
@@ -473,6 +509,10 @@ const FileEditor: React.FC<Props> = ({
         handleSave();
       }
     }
+    // Ctrl+/ comment toggle is handled natively by CodeMirror's defaultKeymap
+    // (Mod-/ -> toggleComment). Do NOT also handle it here, or the two toggles
+    // cancel each other out. Comment tokens for languageless files (nginx.conf,
+    // .ini, shell, ...) are supplied via getFallbackCommentTokens().
     if (e.key === 'Escape') {
       handleClose();
     }
@@ -617,6 +657,7 @@ const FileEditor: React.FC<Props> = ({
           <div className="flex items-center gap-4">
             <span>Ctrl+S save</span>
             <span>Ctrl+F search</span>
+            <span>Ctrl+/ comment</span>
             <span>Esc close</span>
           </div>
           <div className="flex items-center gap-4">
